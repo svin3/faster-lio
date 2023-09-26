@@ -150,7 +150,7 @@ Visualization Manager:
           Position Transformer: XYZ
           Queue Size: 100000
           Selectable: true
-          Size (Pixels): 1
+          Size (Pixels): 2
           Size (m): 0.009999999776482582
           Style: Points
           Topic: /cloud_registered
@@ -331,7 +331,7 @@ Visualization Manager:
     Background Color: 0; 0; 0
     Default Light: true
     Fixed Frame: camera_init
-    Frame Rate: 10
+    Frame Rate: 60
   Name: root
   Tools:
     - Class: rviz/Interact
@@ -354,25 +354,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 152.17552185058594
+      Distance: 16.0
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 11.471270561218262
-        Y: 33.732704162597656
-        Z: -18.399494171142578
+        X: 0.0
+        Y: 0.0
+        Z: 0.0
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.3947964310646057
+      Pitch: 0.785398
       Target Frame: global
       Value: Orbit (rviz)
-      Yaw: 4.6272053718566895
+      Yaw: 0.785398
     Saved: ~
 Window Geometry:
   Displays:

@@ -43,7 +43,7 @@ class LaserMapping {
     void Run();
 
     // callbacks of lidar and imu
-    void StandardPCLCallBack(const sensor_msgs::PointCloud2::ConstPtr &msg);
+    void StandardPCLCallBack(const sensor_msgs::PointCloud2::ConstPtr &msg, int sensor_id = 0);
     void LivoxPCLCallBack(const livox_ros_driver::CustomMsg::ConstPtr &msg);
     void IMUCallBack(const sensor_msgs::Imu::ConstPtr &msg_in);
 
@@ -97,6 +97,7 @@ class LaserMapping {
     std::vector<double> extrinT_{3, 0.0};  // lidar-imu translation
     std::vector<double> extrinR_{9, 0.0};  // lidar-imu rotation
     std::string map_file_path_;
+    std::vector<std::vector<double>> lidar_tf_;  // lidar transform(translation/rotation)
 
     /// point clouds data
     CloudPtr scan_undistort_{new PointCloudType()};   // scan after undistortion
@@ -111,7 +112,7 @@ class LaserMapping {
     common::VV4F plane_coef_;                         // plane coeffs
 
     /// ros pub and sub stuffs
-    ros::Subscriber sub_pcl_;
+    ros::Subscriber sub_pcl_, sub_pcl2_, sub_pcl3_;
     ros::Subscriber sub_imu_;
     ros::Publisher pub_laser_cloud_world_;
     ros::Publisher pub_laser_cloud_body_;
@@ -146,6 +147,10 @@ class LaserMapping {
     int scan_num_ = 0;
     bool timediff_set_flg_ = false;
     int effect_feat_num_ = 0, frame_num_ = 0;
+    bool multiple_sensor_enabled_ = false;
+    int prime_sensor_ = 0;
+    double prime_last_lidar_time_ = 0;
+    double prime_last_test_time_ = 0;
 
     ///////////////////////// EKF inputs and output ///////////////////////////////////////////////////////
     common::MeasureGroup measures_;                    // sync IMU and lidar scan

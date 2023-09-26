@@ -55,7 +55,7 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(ouster_ros::Point,
 
 namespace faster_lio {
 
-enum class LidarType { AVIA = 1, VELO32, OUST64 };
+enum class LidarType { AVIA = 1, VELO32, OUST64, PMD3D };
 
 /**
  * point cloud preprocess
@@ -81,11 +81,13 @@ class PointCloudPreprocess {
     float &TimeScale() { return time_scale_; }
     LidarType GetLidarType() const { return lidar_type_; }
     void SetLidarType(LidarType lt) { lidar_type_ = lt; }
+    void SetMaxRange(double range) { max_range_ = range; } // pmd sensor only
 
    private:
     void AviaHandler(const livox_ros_driver::CustomMsg::ConstPtr &msg);
     void Oust64Handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
     void VelodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &msg);
+    void PmdHandler(const sensor_msgs::PointCloud2::ConstPtr &msg);
 
     PointCloudType cloud_full_, cloud_out_;
 
@@ -96,6 +98,7 @@ class PointCloudPreprocess {
     double blind_ = 0.01;
     float time_scale_ = 1e-3;
     bool given_offset_time_ = false;
+    double max_range_ = 300;
 };
 }  // namespace faster_lio
 

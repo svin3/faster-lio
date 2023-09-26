@@ -92,6 +92,12 @@ bool LaserMapping::LoadParams(ros::NodeHandle &nh) {
     nh.param<std::vector<double>>("mapping/extrinsic_T", extrinT_, std::vector<double>());
     nh.param<std::vector<double>>("mapping/extrinsic_R", extrinR_, std::vector<double>());
 
+    lidar_tf_.resize(3);
+    std::vector<double> zero_tf = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    nh.param<std::vector<double>>("mapping/lidar_tf", lidar_tf_[0], zero_tf);
+    nh.param<std::vector<double>>("mapping/lidar_tf2", lidar_tf_[1], zero_tf);
+    nh.param<std::vector<double>>("mapping/lidar_tf3", lidar_tf_[2], zero_tf);
+
     nh.param<float>("ivox_grid_resolution", ivox_options_.resolution_, 0.2);
     nh.param<int>("ivox_nearby_type", ivox_nearby_type, 18);
 
@@ -105,6 +111,10 @@ bool LaserMapping::LoadParams(ros::NodeHandle &nh) {
     } else if (lidar_type == 3) {
         preprocess_->SetLidarType(LidarType::OUST64);
         LOG(INFO) << "Using OUST 64 Lidar";
+    } else if (lidar_type == 4) {
+        preprocess_->SetLidarType(LidarType::PMD3D);
+        preprocess_->SetMaxRange(det_range_);
+        LOG(INFO) << "Using PMD 3D ToF";
     } else {
         LOG(WARNING) << "unknown lidar_type";
         return false;
@@ -234,7 +244,7 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
 
 void LaserMapping::SubAndPubToROS(ros::NodeHandle &nh) {
     // ROS subscribe initialization
-    std::string lidar_topic, imu_topic;
+    std::string lidar_topic, lidar_topic2, lidar_topic3, imu_topic;
     nh.param<std::string>("common/lid_topic", lidar_topic, "/livox/lidar");
     nh.param<std::string>("common/imu_topic", imu_topic, "/livox/imu");
 
@@ -248,6 +258,26 @@ void LaserMapping::SubAndPubToROS(ros::NodeHandle &nh) {
 
     sub_imu_ = nh.subscribe<sensor_msgs::Imu>(imu_topic, 200000,
                                               [this](const sensor_msgs::Imu::ConstPtr &msg) { IMUCallBack(msg); });
+
+    if (nh.hasParam("common/lid_topic2")) {
+        nh.getParam("common/lid_topic2", lidar_topic2);
+
+        if (preprocess_->GetLidarType() == LidarType::PMD3D) {
+            sub_pcl2_ = nh.subscribe<sensor_msgs::PointCloud2>(
+                lidar_topic2, 200000, [this](const sensor_msgs::PointCloud2::ConstPtr &msg) { StandardPCLCallBack(msg, 1); });
+            multiple_sensor_enabled_ = true;
+        }
+    }
+
+    if (nh.hasParam("common/lid_topic3")) {
+        nh.getParam("common/lid_topic3", lidar_topic3);
+
+        if (preprocess_->GetLidarType() == LidarType::PMD3D) {
+            sub_pcl3_ = nh.subscribe<sensor_msgs::PointCloud2>(
+                lidar_topic3, 200000, [this](const sensor_msgs::PointCloud2::ConstPtr &msg) { StandardPCLCallBack(msg, 2); });
+            multiple_sensor_enabled_ = true;
+        }
+    }
 
     // ROS publisher init
     path_.header.stamp = ros::Time::now();
@@ -355,12 +385,14 @@ void LaserMapping::Run() {
     frame_num_++;
 }
 
-void LaserMapping::StandardPCLCallBack(const sensor_msgs::PointCloud2::ConstPtr &msg) {
+void LaserMapping::StandardPCLCallBack(const sensor_msgs::PointCloud2::ConstPtr &msg, int sensor_id) {
+    if (last_timestamp_imu_ < 0) return;
+
     mtx_buffer_.lock();
     Timer::Evaluate(
         [&, this]() {
             scan_count_++;
-            if (msg->header.stamp.toSec() < last_timestamp_lidar_) {
+            if (msg->header.stamp.toSec() < last_timestamp_lidar_ && !multiple_sensor_enabled_) {
                 LOG(ERROR) << "lidar loop back, clear buffer";
                 lidar_buffer_.clear();
             }
@@ -370,6 +402,25 @@ void LaserMapping::StandardPCLCallBack(const sensor_msgs::PointCloud2::ConstPtr 
             lidar_buffer_.push_back(ptr);
             time_buffer_.push_back(msg->header.stamp.toSec());
             last_timestamp_lidar_ = msg->header.stamp.toSec();
+            
+            lidar_buffer_.back()->header.seq = sensor_id;
+
+            // apply translate & rotate
+            auto tf_vec = lidar_tf_[lidar_buffer_.back()->header.seq];
+            Eigen::Vector3f tf_trans(tf_vec[0], tf_vec[1], tf_vec[2]);
+            Eigen::Matrix3f tf_rot = Eigen::Matrix3f::Identity();
+            Eigen::AngleAxisf rollAngle(tf_vec[3], Eigen::Vector3f::UnitX());
+            Eigen::AngleAxisf pitchAngle(tf_vec[4], Eigen::Vector3f::UnitY());
+            Eigen::AngleAxisf yawAngle(tf_vec[5], Eigen::Vector3f::UnitZ());
+            tf_rot = yawAngle * pitchAngle * rollAngle;
+            Eigen::Vector3f pt;
+            for (auto &lidar_pt : lidar_buffer_.back()->points) {
+                pt << lidar_pt.x, lidar_pt.y, lidar_pt.z;
+                pt = tf_rot * pt + tf_trans;
+                lidar_pt.x = pt(0);
+                lidar_pt.y = pt(1);
+                lidar_pt.z = pt(2);
+            }
         },
         "Preprocess (Standard)");
     mtx_buffer_.unlock();
@@ -435,6 +486,88 @@ bool LaserMapping::SyncPackages() {
     if (lidar_buffer_.empty() || imu_buffer_.empty()) {
         return false;
     }
+
+    mtx_buffer_.lock();
+    if (multiple_sensor_enabled_) {
+        int main_idx = -1;
+        for (int i = 0; i < lidar_buffer_.size(); i++) {
+            if (lidar_buffer_[i]->header.seq == prime_sensor_) {
+                main_idx = i;
+                break;
+            }
+        }
+        if (main_idx < 0) {
+            mtx_buffer_.unlock();
+            return false;
+        } else if (main_idx > 0) {
+            sort(lidar_buffer_.begin(), lidar_buffer_.end(),
+                [](CloudPtr a, CloudPtr b) { return (a->header.stamp < b->header.stamp); });
+            sort(time_buffer_.begin(), time_buffer_.end());
+
+            // Delete duplicate sensor data
+            std::vector<bool> dup_test;
+            dup_test.resize(12, false);
+            for (int i = main_idx; i >= 0; i--) {
+                auto &lidar_i = lidar_buffer_[i];
+                auto sensor_i = lidar_i->header.seq;
+                if (!dup_test[sensor_i]) {
+                    dup_test[sensor_i] = true;
+                } else {
+                    lidar_buffer_.erase(lidar_buffer_.begin() + i);
+                    time_buffer_.erase(time_buffer_.begin() + i);
+                    main_idx--;
+                }
+            }
+
+            auto &lidar_first = lidar_buffer_.front();
+            auto lidar_time_first = time_buffer_.front();
+
+            // std::cout << "[" << lidar_buffer_[0]->header.seq << "] stamp: " << lidar_time_first - first_lidar_time_ << std::endl;
+
+            // Merge point cloud from multiple sensors
+            for (int i = 1; i <= main_idx; i++) {
+                auto &lidar_i = lidar_buffer_[i];
+                auto lidar_time_i = time_buffer_[i];
+
+                float time_offset_ms = (lidar_time_i - lidar_time_first) * float(1000);
+                // if (lidar_i->header.seq == prime_sensor_) std::cout << "*";
+                // std::cout << "[" << lidar_i->header.seq << "] time_offset_ms: " << time_offset_ms << std::endl;
+                for (auto &lidar_pt : lidar_i->points) {
+                    lidar_pt.curvature = time_offset_ms;
+                }
+
+                *lidar_first += *lidar_i;
+            }
+
+            // Automatically changes primary sensor
+            if (prime_last_lidar_time_ > 0 && lidar_time_first - prime_last_test_time_ > 1) {
+                int j = 0;
+                double best_time_interval = lidar_time_first - prime_last_lidar_time_;
+                for (int i = 1; i <= main_idx; i++) {
+                    double time_interval = time_buffer_[i] - time_buffer_[i-1];
+                    if (time_interval >= best_time_interval) {
+                        j = i;
+                        best_time_interval = time_interval;
+                    }
+                }
+
+                if (j > 0) prime_sensor_ = lidar_buffer_[j - 1]->header.seq;
+                else prime_sensor_ = lidar_buffer_[main_idx]->header.seq;
+
+                prime_last_test_time_ = time_buffer_[main_idx];
+            }
+
+            // Delete existing data after merge
+            for (int i = 1; i <= main_idx; i++) {
+                lidar_buffer_.erase(lidar_buffer_.begin() + i);
+                time_buffer_.erase(time_buffer_.begin() + i);
+            }
+
+            lidar_first->header.seq = 0;
+        }
+        prime_last_lidar_time_ = time_buffer_[main_idx];
+    }
+    mtx_buffer_.unlock();
 
     /*** push a lidar scan ***/
     if (!lidar_pushed_) {
