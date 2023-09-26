@@ -387,50 +387,67 @@ void LaserMapping::Run() {
 
 void LaserMapping::StandardPCLCallBack(const sensor_msgs::PointCloud2::ConstPtr &msg, int sensor_id) {
     if (last_timestamp_imu_ < 0) return;
+    standard_pcl_msg_buffer_.emplace_back(msg);
+    sensor_id_buffer_.emplace_back(sensor_id);
+}
 
+void LaserMapping::LivoxPCLCallBack(const livox_ros_driver::CustomMsg::ConstPtr &msg) {
+    livox_pcl_msg_buffer_.emplace_back(msg);
+    sensor_id_buffer_.emplace_back(0);
+}
+
+void LaserMapping::DelayedPCLProcess() {
+    if (preprocess_->GetLidarType() != LidarType::AVIA) {
     mtx_buffer_.lock();
     Timer::Evaluate(
         [&, this]() {
             scan_count_++;
-            if (msg->header.stamp.toSec() < last_timestamp_lidar_ && !multiple_sensor_enabled_) {
+            bool loop_back_test = false;
+            double prev_timestamp_lidar = last_timestamp_lidar_;
+            auto msg = standard_pcl_msg_buffer_.front();
+            if (msg->header.stamp.toSec() < last_timestamp_lidar_) {
                 LOG(ERROR) << "lidar loop back, clear buffer";
-                lidar_buffer_.clear();
+                loop_back_test = true;
+            }
+
+            last_timestamp_lidar_ = msg->header.stamp.toSec();
+
+            if (!time_sync_en_ && abs(last_timestamp_imu_ - last_timestamp_lidar_) > 10.0 && !imu_buffer_.empty() &&
+                !lidar_buffer_.empty()) {
+                LOG(INFO) << "IMU and LiDAR not Synced, IMU time: " << last_timestamp_imu_
+                          << ", lidar header time: " << last_timestamp_lidar_;
+            }
+
+            if (time_sync_en_ && !timediff_set_flg_ && abs(last_timestamp_lidar_ - last_timestamp_imu_) > 1 &&
+                !imu_buffer_.empty()) {
+                timediff_set_flg_ = true;
+                timediff_lidar_wrt_imu_ = last_timestamp_lidar_ + 0.1 - last_timestamp_imu_;
+                LOG(INFO) << "Self sync IMU and LiDAR, time diff is " << timediff_lidar_wrt_imu_;
+                imu_buffer_.clear();
             }
 
             PointCloudType::Ptr ptr(new PointCloudType());
             preprocess_->Process(msg, ptr);
             lidar_buffer_.push_back(ptr);
-            time_buffer_.push_back(msg->header.stamp.toSec());
-            last_timestamp_lidar_ = msg->header.stamp.toSec();
-            
-            lidar_buffer_.back()->header.seq = sensor_id;
+            time_buffer_.push_back(last_timestamp_lidar_);
 
-            // apply translate & rotate
-            auto tf_vec = lidar_tf_[lidar_buffer_.back()->header.seq];
-            Eigen::Vector3f tf_trans(tf_vec[0], tf_vec[1], tf_vec[2]);
-            Eigen::Matrix3f tf_rot = Eigen::Matrix3f::Identity();
-            Eigen::AngleAxisf rollAngle(tf_vec[3], Eigen::Vector3f::UnitX());
-            Eigen::AngleAxisf pitchAngle(tf_vec[4], Eigen::Vector3f::UnitY());
-            Eigen::AngleAxisf yawAngle(tf_vec[5], Eigen::Vector3f::UnitZ());
-            tf_rot = yawAngle * pitchAngle * rollAngle;
-            Eigen::Vector3f pt;
-            for (auto &lidar_pt : lidar_buffer_.back()->points) {
-                pt << lidar_pt.x, lidar_pt.y, lidar_pt.z;
-                pt = tf_rot * pt + tf_trans;
-                lidar_pt.x = pt(0);
-                lidar_pt.y = pt(1);
-                lidar_pt.z = pt(2);
+            standard_pcl_msg_buffer_.pop_front();
+
+            lidar_buffer_.back()->header.stamp = msg->header.stamp.toNSec();
+
+            if (!loop_back_test) {
+                last_timestamp_lidar_ = prev_timestamp_lidar;
             }
         },
         "Preprocess (Standard)");
     mtx_buffer_.unlock();
-}
 
-void LaserMapping::LivoxPCLCallBack(const livox_ros_driver::CustomMsg::ConstPtr &msg) {
+    } else {
     mtx_buffer_.lock();
     Timer::Evaluate(
         [&, this]() {
             scan_count_++;
+            auto msg = livox_pcl_msg_buffer_.front();
             if (msg->header.stamp.toSec() < last_timestamp_lidar_) {
                 LOG(WARNING) << "lidar loop back, clear buffer";
                 lidar_buffer_.clear();
@@ -449,14 +466,43 @@ void LaserMapping::LivoxPCLCallBack(const livox_ros_driver::CustomMsg::ConstPtr 
                 timediff_set_flg_ = true;
                 timediff_lidar_wrt_imu_ = last_timestamp_lidar_ + 0.1 - last_timestamp_imu_;
                 LOG(INFO) << "Self sync IMU and LiDAR, time diff is " << timediff_lidar_wrt_imu_;
+                imu_buffer_.clear();
             }
 
             PointCloudType::Ptr ptr(new PointCloudType());
             preprocess_->Process(msg, ptr);
             lidar_buffer_.emplace_back(ptr);
             time_buffer_.emplace_back(last_timestamp_lidar_);
+
+            livox_pcl_msg_buffer_.pop_front();
         },
         "Preprocess (Livox)");
+
+    mtx_buffer_.unlock();
+        
+    }
+
+    mtx_buffer_.lock();
+
+    lidar_buffer_.back()->header.seq = sensor_id_buffer_.front();
+    sensor_id_buffer_.pop_front();
+
+    // apply translate & rotate
+    auto tf_vec = lidar_tf_[lidar_buffer_.back()->header.seq];
+    Eigen::Vector3f tf_trans(tf_vec[0], tf_vec[1], tf_vec[2]);
+    Eigen::Matrix3f tf_rot = Eigen::Matrix3f::Identity();
+    Eigen::AngleAxisf rollAngle(tf_vec[3], Eigen::Vector3f::UnitX());
+    Eigen::AngleAxisf pitchAngle(tf_vec[4], Eigen::Vector3f::UnitY());
+    Eigen::AngleAxisf yawAngle(tf_vec[5], Eigen::Vector3f::UnitZ());
+    tf_rot = yawAngle * pitchAngle * rollAngle;
+    Eigen::Vector3f pt;
+    for (auto &lidar_pt : lidar_buffer_.back()->points) {
+        pt << lidar_pt.x, lidar_pt.y, lidar_pt.z;
+        pt = tf_rot * pt + tf_trans;
+        lidar_pt.x = pt(0);
+        lidar_pt.y = pt(1);
+        lidar_pt.z = pt(2);
+    }
 
     mtx_buffer_.unlock();
 }
@@ -483,6 +529,12 @@ void LaserMapping::IMUCallBack(const sensor_msgs::Imu::ConstPtr &msg_in) {
 }
 
 bool LaserMapping::SyncPackages() {
+    if (lidar_buffer_.empty() || multiple_sensor_enabled_) {
+        if (!standard_pcl_msg_buffer_.empty() || !livox_pcl_msg_buffer_.empty()) {
+            DelayedPCLProcess();
+        }
+    }
+
     if (lidar_buffer_.empty() || imu_buffer_.empty()) {
         return false;
     }

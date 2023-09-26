@@ -46,6 +46,7 @@ class LaserMapping {
     void StandardPCLCallBack(const sensor_msgs::PointCloud2::ConstPtr &msg, int sensor_id = 0);
     void LivoxPCLCallBack(const livox_ros_driver::CustomMsg::ConstPtr &msg);
     void IMUCallBack(const sensor_msgs::Imu::ConstPtr &msg_in);
+    void DelayedPCLProcess();
 
     // sync lidar with imu
     bool SyncPackages();
@@ -126,6 +127,9 @@ class LaserMapping {
     std::deque<double> time_buffer_;
     std::deque<PointCloudType::Ptr> lidar_buffer_;
     std::deque<sensor_msgs::Imu::ConstPtr> imu_buffer_;
+    std::deque<livox_ros_driver::CustomMsg::ConstPtr> livox_pcl_msg_buffer_;
+    std::deque<sensor_msgs::PointCloud2::ConstPtr> standard_pcl_msg_buffer_;
+    std::deque<int> sensor_id_buffer_;
     nav_msgs::Odometry odom_aft_mapped_;
 
     /// options
