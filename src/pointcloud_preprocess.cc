@@ -26,6 +26,10 @@ void PointCloudPreprocess::Process(const sensor_msgs::PointCloud2::ConstPtr &msg
             VelodyneHandler(msg);
             break;
 
+        case LidarType::PMD3D:
+            PmdHandler(msg);
+            break;
+
         default:
             LOG(ERROR) << "Error LiDAR Type";
             break;
@@ -183,6 +187,49 @@ void PointCloudPreprocess::VelodyneHandler(const sensor_msgs::PointCloud2::Const
             if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > (blind_ * blind_)) {
                 cloud_out_.points.push_back(added_pt);
             }
+        }
+    }
+}
+
+void PointCloudPreprocess::PmdHandler(const sensor_msgs::PointCloud2::ConstPtr &msg) {
+    cloud_out_.clear();
+    cloud_full_.clear();
+
+    pcl::PointCloud<pcl::PointXYZ> pl_orig;
+    pcl::fromROSMsg(*msg, pl_orig);
+    int plsize = pl_orig.size();
+    if (plsize == 0) return;
+
+    cloud_out_.reserve(plsize);
+    cloud_full_.resize(plsize);
+
+    std::vector<bool> is_valid_pt(plsize, false);
+    std::vector<uint> index(plsize - 1);
+    for (uint i = 0; i < plsize - 1; ++i) {
+        index[i] = i + 1;  // 从1开始
+    }
+
+    double blind_sq = blind_ * blind_;
+    double max_range_sq = max_range_ * max_range_;
+
+    std::for_each(std::execution::par_unseq, index.begin(), index.end(), [&](const uint &i) {
+        if (i % point_filter_num_ == 0) {
+            cloud_full_[i].x = pl_orig.points[i].z;
+            cloud_full_[i].y = -pl_orig.points[i].x;
+            cloud_full_[i].z = -pl_orig.points[i].y;
+            cloud_full_[i].intensity = 0;
+            cloud_full_[i].curvature = 0;  // curvature unit: ms
+
+            double range_sq = cloud_full_[i].x * cloud_full_[i].x + cloud_full_[i].y * cloud_full_[i].y +
+                        cloud_full_[i].z * cloud_full_[i].z;
+
+            if (range_sq > blind_sq && range_sq < max_range_sq) is_valid_pt[i] = true;
+        }
+    });
+
+    for (uint i = 1; i < plsize; i++) {
+        if (is_valid_pt[i]) {
+            cloud_out_.points.push_back(cloud_full_[i]);
         }
     }
 }
