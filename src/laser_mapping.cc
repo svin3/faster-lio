@@ -563,7 +563,7 @@ bool LaserMapping::SyncPackages() {
                 time_buffer_.erase(time_buffer_.begin() + i);
             }
 
-            lidar_first->header.seq = 0;
+            lidar_first->header.seq = prime_sensor_;
         }
         prime_last_lidar_time_ = time_buffer_[main_idx];
     }
